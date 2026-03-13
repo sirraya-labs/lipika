@@ -1,0 +1,65 @@
+# configs/live.yaml
+# Vani-Sovereign-Live: real-time conversational TTS
+# Target TTFA < 100ms, 44.1kHz output
+
+variant: live
+
+rvq:
+  sample_rate: 44100
+  n_codebooks: 10
+  codebook_size: 2048
+  codebook_dim: 256
+  encoder_channels: 512
+  encoder_depth: 6
+  decoder_channels: 512
+  decoder_depth: 6
+  w2v_bert_dim: 1024
+
+script:
+  n_script_families: 12
+  embed_dim: 64
+  model_dim: 3072
+
+slow_ar:
+  vocab_size: 32000
+  speech_vocab_size: 2048
+  hidden_dim: 3072
+  n_heads: 24
+  n_kv_heads: 6
+  n_layers: 24
+  intermediate_dim: 8192
+  n_experts: 8
+  n_experts_active: 2
+  expert_dim: 8192
+  max_seq_len: 4096
+  sliding_window: 2048
+  n_global_tokens: 32
+  temperature: 0.85
+  top_p: 0.95
+  max_reasoning_tokens: 128
+
+fast_ar:
+  n_codebooks: 10
+  codebook_size: 2048
+  hidden_dim: 1024
+  n_heads: 16
+  n_kv_heads: 4
+  n_layers: 16
+  intermediate_dim: 4096
+  temperature: 0.8
+  top_p: 0.9
+
+training:
+  w_recon: 1.0
+  w_vq: 1.0
+  w_semantic: 10.0
+  w_slow_ar: 1.0
+  w_fast_ar: 1.0
+  w_moe_aux: 0.01
+
+inference:
+  max_concurrent_requests: 32
+  kv_cache_dtype: fp8
+  stream_chunk_frames: 10
+  target_ttfa_ms: 100.0
+  enable_prefix_cache: true
