@@ -1,14 +1,14 @@
-"""setup.py — Vani TTS package"""
+"""setup.py — Lipika TTS package"""
 from setuptools import setup, find_packages
 
 setup(
-    name="vani-tts",
+    name="lipika-tts",
     version="0.1.0",
-    description="Vani: Sovereign Foundational TTS for Indian Languages",
+    description="Lipika: Sovereign Foundational TTS for Indian Languages",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
     author="India AI Mission",
-    url="https://github.com/india-ai/vani",
+    url="https://github.com/india-ai/lipika",
     license="Apache-2.0",
     packages=find_packages(),
     python_requires=">=3.10",
@@ -52,8 +52,8 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "vani-synthesize=vani.inference.cli:main",
-            "vani-serve=vani.inference.engine:serve_cli",
+            "lipika-synthesize=lipika.inference.cli:main",
+            "lipika-serve=lipika.inference.engine:serve_cli",
         ]
     },
 )

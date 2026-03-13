@@ -1,5 +1,5 @@
 # configs/live.yaml
-# Vani-Sovereign-Live: real-time conversational TTS
+# Lipika-Sovereign-Live: real-time conversational TTS
 # Target TTFA < 100ms, 44.1kHz output
 
 variant: live

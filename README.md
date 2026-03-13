@@ -1,4 +1,4 @@
-# 🎙️ Vani — Voice of India
+# 🎙️ Lipika — Voice of India
 
 **Sovereign, SOTA Foundational TTS Model for Indian Languages**
 
@@ -6,7 +6,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.3+](https://img.shields.io/badge/pytorch-2.3+-ee4c2c.svg)](https://pytorch.org/)
 
-Vani is an open-source, sovereign foundational TTS model designed to be the world's best for Indian languages. It combines the latest 2026 research: asymmetric Dual-AR decoding, RVQ tokenization with semantic distillation, inline token-level instruction control, and a "Silent Thought" reasoning paradigm.
+Lipika is an open-source, sovereign foundational TTS model designed to be the world's best for Indian languages. It combines the latest 2026 research: asymmetric Dual-AR decoding, RVQ tokenization with semantic distillation, inline token-level instruction control, and a "Silent Thought" reasoning paradigm.
 
 ## Architecture Overview
 
@@ -56,13 +56,13 @@ Hindi, Bengali, Telugu, Marathi, Tamil, Gujarati, Urdu, Kannada, Odia, Malayalam
 ## Quickstart
 
 ```bash
-pip install vani-tts
+pip install lipika-tts
 ```
 
 ```python
-from vani import VaniModel
+from lipika import LipikaModel
 
-model = VaniModel.from_pretrained("india-ai/vani-sovereign-live")
+model = LipikaModel.from_pretrained("india-ai/lipika-sovereign-live")
 
 # Basic synthesis
 audio = model.synthesize("नमस्ते, मैं वाणी हूँ।", language="hi")
@@ -83,15 +83,15 @@ for chunk in model.stream("आज का मौसम बहुत अच्छ�
 
 | Variant | Params | Latency | Use Case |
 |---------|--------|---------|----------|
-| `vani-sovereign-pro` | ~6B | ~2s | Highest quality, content creation |
-| `vani-sovereign-live` | ~4.5B | <100ms | Real-time conversational |
-| `vani-sovereign-lite` | ~0.6B | <50ms | On-device, edge deployment |
+| `lipika-sovereign-pro` | ~6B | ~2s | Highest quality, content creation |
+| `lipika-sovereign-live` | ~4.5B | <100ms | Real-time conversational |
+| `lipika-sovereign-lite` | ~0.6B | <50ms | On-device, edge deployment |
 
 ## Project Structure
 
 ```
-vani/
-├── vani/
+lipika/
+├── lipika/
 │   ├── tokenizer/
 │   │   ├── rvq_tokenizer.py      # RVQ with semantic distillation
 │   │   ├── script_adapter.py     # Script-family adapters (22 languages)
@@ -100,7 +100,7 @@ vani/
 │   │   ├── slow_ar.py            # MoE Slow AR (4-5B)
 │   │   ├── fast_ar.py            # Fast AR (400M) + MTP head
 │   │   ├── reasoning.py          # Silent Thought module
-│   │   └── vani.py               # Full model assembly
+│   │   └── lipika.py               # Full model assembly
 │   ├── training/
 │   │   ├── tokenizer_trainer.py  # RVQ training
 │   │   ├── pretrain.py           # LLM pre-training
@@ -127,11 +127,11 @@ See [TRAINING.md](TRAINING.md) for the full multi-stage training recipe.
 ## Citation
 
 ```bibtex
-@misc{vani2026,
-  title={Vani: A Sovereign Foundational TTS Model for Indian Languages},
+@misc{lipika2026,
+  title={Lipika: A Sovereign Foundational TTS Model for Indian Languages},
   author={India AI Mission},
   year={2026},
-  url={https://github.com/india-ai/vani}
+  url={https://github.com/india-ai/lipika}
 }
 ```
 

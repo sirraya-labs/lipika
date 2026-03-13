@@ -1,4 +1,4 @@
-# TRAINING.md — Vani Training Recipe
+# TRAINING.md — Lipika Training Recipe
 
 ## Overview: 5-Stage Training Pipeline
 
@@ -100,7 +100,7 @@ Pre-train the MoE transformer on text only (10B+ tokens of Indian language text)
 This initializes strong language understanding before speech.
 
 ```bash
-torchrun --nproc_per_node=8 vani/training/pretrain.py \
+torchrun --nproc_per_node=8 lipika/training/pretrain.py \
   --stage text_lm \
   --config configs/live.yaml \
   --data_path /data/text_corpus \
@@ -114,7 +114,7 @@ Mixed objective: next text token (40%) + next CB1 speech token (60%).
 Reasoning traces injected at 20% of examples.
 
 ```bash
-torchrun --nproc_per_node=8 vani/training/pretrain.py \
+torchrun --nproc_per_node=8 lipika/training/pretrain.py \
   --stage text_cb1 \
   --config configs/live.yaml \
   --data_path /data/speech_and_text \
@@ -134,7 +134,7 @@ torchrun --nproc_per_node=8 vani/training/pretrain.py \
 Full model: Slow AR + Fast AR + RVQ (tokenizer frozen).
 
 ```bash
-torchrun --nproc_per_node=16 vani/training/pretrain.py \
+torchrun --nproc_per_node=16 lipika/training/pretrain.py \
   --stage joint \
   --config configs/live.yaml \
   --data_path /data/speech_paired \
@@ -169,7 +169,7 @@ Instruction dataset composition:
 ### 4b: GRPO RL Alignment (100 A100-hours)
 
 ```bash
-python vani/training/rl_trainer.py \
+python lipika/training/rl_trainer.py \
   --config configs/live.yaml \
   --base_model /checkpoints/instruction_tuned/latest \
   --reward_mos_model /checkpoints/mos_predictor \
