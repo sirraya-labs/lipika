@@ -5,7 +5,7 @@ setup(
     name="lipika-tts",
     version="0.1.0",
     description="Lipika: Sovereign Foundational TTS for Indian Languages",
-    long_description=open("README.md").read(),
+    long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     author="India AI Mission",
     url="https://github.com/india-ai/lipika",
