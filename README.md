@@ -124,16 +124,7 @@ lipika/
 
 See [TRAINING.md](TRAINING.md) for the full multi-stage training recipe.
 
-## Citation
 
-```bibtex
-@misc{lipika2026,
-  title={Lipika: A Sovereign Foundational TTS Model for Indian Languages},
-  author={India AI Mission},
-  year={2026},
-  url={https://github.com/india-ai/lipika}
-}
-```
 
 ## License
 
