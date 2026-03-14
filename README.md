@@ -87,10 +87,6 @@ lipika/
 └── tests/
 ```
 
-## Training
-
-See [TRAINING.md](TRAINING.md) for the full multi-stage training recipe.
-
 
 
 ## License
