@@ -53,39 +53,6 @@ All 22 Scheduled Indian Languages + English, with Hinglish code-switching suppor
 
 Hindi, Bengali, Telugu, Marathi, Tamil, Gujarati, Urdu, Kannada, Odia, Malayalam, Punjabi, Assamese, Maithili, Sanskrit, Santali, Kashmiri, Nepali, Sindhi, Konkani, Dogri, Manipuri, Bodo
 
-## Quickstart
-
-```bash
-pip install lipika-tts
-```
-
-```python
-from lipika import LipikaModel
-
-model = LipikaModel.from_pretrained("india-ai/lipika-sovereign-live")
-
-# Basic synthesis
-audio = model.synthesize("नमस्ते, मैं वाणी हूँ।", language="hi")
-
-# With inline style control
-audio = model.synthesize(
-    "This <[excited]>discovery<[/excited]> will change everything.",
-    speaker="female_calm",
-    language="en-IN"
-)
-
-# Stream for real-time (< 100ms TTFA)
-for chunk in model.stream("आज का मौसम बहुत अच्छा है।"):
-    play(chunk)
-```
-
-## Model Variants
-
-| Variant | Params | Latency | Use Case |
-|---------|--------|---------|----------|
-| `lipika-sovereign-pro` | ~6B | ~2s | Highest quality, content creation |
-| `lipika-sovereign-live` | ~4.5B | <100ms | Real-time conversational |
-| `lipika-sovereign-lite` | ~0.6B | <50ms | On-device, edge deployment |
 
 ## Project Structure
 
