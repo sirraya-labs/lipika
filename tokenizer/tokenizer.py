@@ -271,11 +271,39 @@ DEVICE: torch.device = get_device()
 # LOGGING
 # =============================================================================
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+def _configure_root_logger() -> None:
+    """
+    Configure root logger with a Windows-safe UTF-8 stream handler.
+
+    On Windows, the default console encoding (cp1252) cannot render
+    Unicode box-drawing or arrow characters. We explicitly set the
+    stream handler to use UTF-8 with error replacement so logging
+    never crashes, regardless of the OS locale.
+    """
+    import io
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    # Wrap stdout in a UTF-8 writer that replaces unencodable chars
+    try:
+        utf8_stream = io.TextIOWrapper(
+            sys.stdout.buffer,
+            encoding="utf-8",
+            errors="replace",
+            line_buffering=True,
+        )
+        handler = logging.StreamHandler(utf8_stream)
+    except AttributeError:
+        # sys.stdout may not have .buffer in some IDEs / PYTHONIOENCODING setups
+        handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(fmt)
+    root.addHandler(handler)
+
+
+_configure_root_logger()
 logger = logging.getLogger("lipika")
 
 
@@ -285,7 +313,8 @@ def setup_logging(log_dir: Path, rank: int = 0) -> None:
         logging.disable(logging.CRITICAL)
         return
     log_dir.mkdir(parents=True, exist_ok=True)
-    fh = logging.FileHandler(log_dir / "training.log")
+    # Always write the log file as UTF-8 regardless of OS locale
+    fh = logging.FileHandler(log_dir / "training.log", encoding="utf-8")
     fh.setFormatter(logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     ))
@@ -526,29 +555,42 @@ class ResBlock(nn.Module):
 
 
 class EncoderBlock(nn.Module):
-    """Strided downsampling block: residual stack + strided conv."""
+    """
+    Strided downsampling block: residual stack + strided conv with channel gating.
+
+    Channel flow: in=C -> res stack (C) -> down conv (C->2C) -> gate (2C->C) -> pool
+    Net output channels = C (same as input). The down conv + gate pattern acts as a
+    learned gated linear unit for the downsampling step (EnCodec [1] design).
+    """
 
     def __init__(self, channels: int, stride: int) -> None:
         super().__init__()
-        self.res = nn.Sequential(*[ResBlock(channels, d) for d in [1, 3, 9]])
+        self.res  = nn.Sequential(*[ResBlock(channels, d) for d in [1, 3, 9]])
+        # Doubles channels; gating in forward halves back to channels
         self.down = CausalConv1d(channels, channels * 2, kernel_size=2 * stride, dilation=1)
         self.stride_pool = nn.AvgPool1d(stride, stride)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.res(x)
-        x = self.down(x)
-        x = x[:, : x.shape[1] // 2, :]   # channel gating
-        x = self.stride_pool(x)
+        x = self.res(x)                        # (B, C, T)
+        x = self.down(x)                       # (B, 2C, T)
+        x = x[:, : x.shape[1] // 2, :]        # gate: (B, C, T)  — net channels unchanged
+        x = self.stride_pool(x)                # (B, C, T/stride)
         return x
 
 
 class DecoderBlock(nn.Module):
-    """Strided upsampling block: causal ConvTranspose1d + residual stack."""
+    """
+    Strided upsampling block: causal ConvTranspose1d + residual stack.
+
+    Channel flow: in=C -> up conv (C->C) -> res stack (C)
+    Net output channels = C (same as input), mirroring EncoderBlock.
+    """
 
     def __init__(self, channels: int, stride: int) -> None:
         super().__init__()
-        self.up = CausalConvTranspose1d(channels, channels // 2, kernel_size=2 * stride, stride=stride)
-        self.res = nn.Sequential(*[ResBlock(channels // 2, d) for d in [1, 3, 9]])
+        # Keep channels constant through the upsampling block
+        self.up  = CausalConvTranspose1d(channels, channels, kernel_size=2 * stride, stride=stride)
+        self.res = nn.Sequential(*[ResBlock(channels, d) for d in [1, 3, 9]])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.res(self.up(x))
@@ -615,15 +657,17 @@ class AudioEncoder(nn.Module):
         C = model_cfg.encoder_channels
         self.stem = CausalConv1d(1, C, kernel_size=7)
 
-        blocks, ch = [], C
+        # Each EncoderBlock keeps channels constant (down conv doubles, gating halves).
+        # All blocks operate at C channels; only temporal resolution decreases.
+        blocks = []
         for stride in self.STRIDES:
-            blocks.append(EncoderBlock(ch, stride))
-            ch = ch * 2
+            blocks.append(EncoderBlock(C, stride))
         self.blocks = nn.Sequential(*blocks)
 
+        # Bottleneck: C -> C (identity channel count; projects to ensure clean latent)
         self.bottleneck = nn.Sequential(
             nn.ELU(),
-            CausalConv1d(ch, C, kernel_size=1),
+            CausalConv1d(C, C, kernel_size=1),
         )
         self.norm = nn.LayerNorm(C)
 
@@ -831,14 +875,16 @@ class AudioDecoder(nn.Module):
         C = model_cfg.decoder_channels
         self.entry = CausalConv1d(C, C, kernel_size=7)
 
-        blocks, ch = [], C
+        # Each DecoderBlock keeps channels constant at C
+        blocks = []
         for stride in self.STRIDES:
-            blocks.append(DecoderBlock(ch, stride))
-            ch = ch // 2
+            blocks.append(DecoderBlock(C, stride))
         self.blocks = nn.Sequential(*blocks)
+
+        # Final projection: C channels -> 1 (mono waveform)
         self.out = nn.Sequential(
             nn.ELU(),
-            CausalConv1d(ch, 1, kernel_size=7),
+            CausalConv1d(C, 1, kernel_size=7),
             nn.Tanh(),
         )
 
@@ -1540,7 +1586,7 @@ class AudioDataset(Dataset):
 
         if sr != self.sample_rate:
             if not LIBROSA_AVAILABLE:
-                raise RuntimeError(f"librosa required for resampling {sr}→{self.sample_rate}. pip install librosa")
+                raise RuntimeError(f"librosa required for resampling {sr}->{self.sample_rate}. pip install librosa")
             audio = librosa.resample(audio, orig_sr=sr, target_sr=self.sample_rate)
 
         audio = torch.from_numpy(audio).float()
@@ -1788,6 +1834,7 @@ def train(
     model_cfg: ModelConfig,
     train_cfg: TrainingConfig,
     resume_from: Optional[str] = None,
+    use_semantic: bool = True,
 ) -> None:
     """
     Main training function, launched per GPU rank (or once for CPU/MPS).
@@ -1818,7 +1865,7 @@ def train(
     # AMP only on CUDA
     use_amp = train_cfg.mixed_precision and is_cuda
     if train_cfg.mixed_precision and not is_cuda:
-        logger.info(f"Mixed precision requested but device is '{base_device.type}'. Disabled → float32.")
+        logger.info(f"Mixed precision requested but device is '{base_device.type}'. Disabled -> float32.")
 
     use_pin_memory = train_cfg.pin_memory and is_cuda
 
@@ -1839,14 +1886,14 @@ def train(
     # Log hardware info once
     if rank == 0:
         logger.info(f"{'='*70}")
-        logger.info(f"  Lipika Tokenizer — Production Training")
+        logger.info(f"  Lipika Tokenizer - Production Training")
         logger.info(f"  Device  : {device_info(device)}")
         logger.info(f"  AMP     : {use_amp}  |  Distributed: {is_distributed} ({world_size} GPUs)")
-        logger.info(f"  Batch   : {train_cfg.batch_size} × {train_cfg.grad_accum_steps} (accum)")
+        logger.info(f"  Batch   : {train_cfg.batch_size} x {train_cfg.grad_accum_steps} (accum)")
         logger.info(f"{'='*70}")
 
     # ── Models ─────────────────────────────────────────────────────────────
-    model         = LipikaTokenizer(audio_cfg, rvq_cfg, model_cfg, use_semantic_teacher=True).to(device)
+    model         = LipikaTokenizer(audio_cfg, rvq_cfg, model_cfg, use_semantic_teacher=use_semantic).to(device)
     discriminator = MultiScaleMultiPeriodDiscriminator(model_cfg).to(device)
 
     if train_cfg.compile_model and is_cuda:
@@ -1940,7 +1987,7 @@ def train(
     )
 
     # ── Writer / Checkpoint / Metrics ──────────────────────────────────────
-    writer    = SummaryWriter(log_dir=train_cfg.log_dir)   if rank == 0 else SummaryWriter.__new__(SummaryWriter)
+    writer = SummaryWriter(log_dir=train_cfg.log_dir) if rank == 0 else SummaryWriter()
     ckpt_mgr  = CheckpointManager(Path(train_cfg.checkpoint_dir), train_cfg.keep_last_n_checkpoints, rank)
     metrics_tracker = MetricsTracker()
 
@@ -1950,8 +1997,8 @@ def train(
     if rank == 0:
         plot_dir.mkdir(parents=True, exist_ok=True)
         output_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Plots  → {plot_dir.resolve()}")
-        logger.info(f"Outputs→ {output_dir.resolve()}")
+        logger.info(f"Plots   -> {plot_dir.resolve()}")
+        logger.info(f"Outputs -> {output_dir.resolve()}")
 
     # ── Resume ─────────────────────────────────────────────────────────────
     global_step = 0
@@ -2136,7 +2183,7 @@ def train(
                         writer.add_scalar(f"val/{k}", v, global_step)
                         metrics_tracker.update(global_step, {f"val/{k}": v})
                     logger.info(
-                        f"Step {global_step} │ "
+                        f"Step {global_step} | "
                         f"val_recon={val_metrics['recon_loss']:.5f}  "
                         f"val_mel={val_metrics['mel_loss']:.5f}"
                     )
@@ -2170,8 +2217,8 @@ def train(
             epoch_time = time.time() - epoch_start
             avg = {k: v / max(step_count, 1) for k, v in epoch_metrics.items()}
             logger.info(
-                f"Epoch {epoch+1:3d}/{train_cfg.num_epochs} │ "
-                f"time={epoch_time:.1f}s │ "
+                f"Epoch {epoch+1:3d}/{train_cfg.num_epochs} | "
+                f"time={epoch_time:.1f}s | "
                 + "  ".join(f"{k}={v:.4f}" for k, v in avg.items())
             )
 
@@ -2330,45 +2377,70 @@ def _load_model_from_checkpoint(
 
 def smoke_test(device_str: str = "auto") -> None:
     """
-    Run a minimal end-to-end forward pass to verify correctness.
-    Does not require any real audio data.
+    Run minimal end-to-end forward passes for every preset size.
+    Catches channel-shape bugs immediately without requiring real data.
     """
-    logger.info("Running smoke test…")
+    logger.info("Running smoke test...")
     device = get_device(device_str)
     logger.info(f"Smoke-test device: {device_info(device)}")
 
-    audio_cfg = AudioConfig(sample_rate=24_000)
-    rvq_cfg   = RVQConfig(n_codebooks=4, codebook_size=64)   # small for speed
-    model_cfg = ModelConfig(
-        encoder_channels=64, encoder_depth=2,
-        decoder_channels=64, decoder_depth=2,
-        disc_channels=16, disc_depth=2,
-    )
+    test_configs = [
+        ("cpu-tiny",   64,  4, 64),
+        ("gpu-small",  128, 4, 128),
+        ("gpu-full",   256, 4, 256),
+    ]
 
-    model = LipikaTokenizer(audio_cfg, rvq_cfg, model_cfg, use_semantic_teacher=False).to(device)
-    model.train()
+    B = 1
+    T = 24_000  # 1-second batch (fast)
 
-    B, T = 2, 24_000 * 2   # 2-second batch
-    waveform   = torch.randn(B, 1, T, device=device)
-    script_ids = torch.randint(0, model_cfg.n_script_families, (B,), device=device)
+    all_passed = True
+    for label, enc_ch, n_cb, dec_ch in test_configs:
+        try:
+            audio_cfg = AudioConfig(sample_rate=24_000)
+            rvq_cfg   = RVQConfig(n_codebooks=n_cb, codebook_size=64)
+            model_cfg = ModelConfig(
+                encoder_channels=enc_ch,
+                decoder_channels=dec_ch,
+                disc_channels=16, disc_depth=2,
+            )
+            model = LipikaTokenizer(
+                audio_cfg, rvq_cfg, model_cfg, use_semantic_teacher=False
+            ).to(device)
+            model.train()
 
-    fwd = model(waveform, script_ids)
+            waveform   = torch.randn(B, 1, T, device=device)
+            script_ids = torch.randint(0, model_cfg.n_script_families, (B,), device=device)
 
-    assert fwd["reconstructed"].shape[0] == B
-    assert fwd["codes"].shape[-1] == rvq_cfg.n_codebooks
+            fwd = model(waveform, script_ids)
+            assert fwd["reconstructed"].shape == (B, 1, T), \
+                f"Recon shape mismatch: {fwd['reconstructed'].shape} != {(B, 1, T)}"
+            assert fwd["codes"].shape[-1] == n_cb, \
+                f"Codes codebook dim wrong: {fwd['codes'].shape[-1]} != {n_cb}"
 
-    # Test encode / decode round-trip
-    model.eval()
-    codes = model.encode(waveform, script_ids)
-    recon = model.decode(codes)
-    assert recon.shape[0] == B
+            # Encode/decode round-trip
+            model.eval()
+            codes = model.encode(waveform, script_ids)
+            recon = model.decode(codes)
+            assert recon.shape[0] == B
 
-    n_params = model.num_parameters(exclude_teacher=True)
-    logger.info(f"Smoke test PASSED. Model params: {n_params/1e6:.2f} M")
-    logger.info(f"  Codes shape   : {codes.shape}")
+            n_params = model.num_parameters(exclude_teacher=True)
+            logger.info(
+                f"  [{label}] PASSED  enc={enc_ch}ch  cb={n_cb}x64  "
+                f"params={n_params/1e6:.2f}M  "
+                f"codes={codes.shape}  recon={recon.shape}"
+            )
+        except Exception as e:
+            logger.error(f"  [{label}] FAILED: {e}")
+            all_passed = False
+
+    if all_passed:
+        logger.info("All smoke tests PASSED.")
+    else:
+        logger.error("Some smoke tests FAILED. Check errors above.")
+        raise RuntimeError("Smoke test failure - do not proceed to training.")
     logger.info(f"  Recon shape   : {recon.shape}")
     logger.info(f"  Frame rate    : {model.frame_rate:.1f} Hz")
-    logger.info(f"  Compress ratio: {model.encoder.compression_ratio}×")
+    logger.info(f"  Compress ratio: {model.encoder.compression_ratio}x")
 
 
 # =============================================================================
@@ -2389,15 +2461,26 @@ def parse_args() -> argparse.Namespace:
     tr.add_argument("--log-dir",         default="./logs")
     tr.add_argument("--plot-dir",        default="./plots",   help="Directory for training curve plots")
     tr.add_argument("--output-dir",      default="./outputs", help="Directory for audio sample outputs")
-    tr.add_argument("--batch-size",      type=int,   default=8)
+    tr.add_argument("--batch-size",      type=int,   default=None,
+                    help="Override batch size (preset sets a sensible default)")
     tr.add_argument("--epochs",          type=int,   default=200)
     tr.add_argument("--lr",              type=float, default=3e-4)
     tr.add_argument("--resume",          default=None)
     tr.add_argument("--gpus",            type=int,   default=1)
     tr.add_argument("--compile",         action="store_true")
-    tr.add_argument("--no-semantic",     action="store_true")
+    tr.add_argument("--no-semantic",     action="store_true",
+                    help="Disable W2V-BERT semantic distillation (faster, less VRAM)")
     tr.add_argument("--device",          default="auto",
                     help="Compute device: 'auto' | 'cuda' | 'cuda:N' | 'mps' | 'cpu'")
+    tr.add_argument("--preset",          default="auto",
+                    choices=["auto", "cpu", "gpu-small", "gpu-full"],
+                    help=(
+                        "Model + training size preset. "
+                        "'auto' picks based on detected hardware. "
+                        "'cpu' = tiny model, batch=2, fast to iterate. "
+                        "'gpu-small' = medium model, batch=4 (~8 GB VRAM). "
+                        "'gpu-full' = full EnCodec-scale, batch=8 (~16 GB VRAM)."
+                    ))
     tr.add_argument("--save-every",      type=int,   default=5_000, dest="save_every")
     tr.add_argument("--eval-every",      type=int,   default=1_000, dest="eval_every")
     tr.add_argument("--plot-every",      type=int,   default=500,   dest="plot_every")
@@ -2429,6 +2512,89 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# =============================================================================
+# PRESET SYSTEM  — auto-scales model + training for the detected hardware
+# =============================================================================
+
+@dataclass
+class _Preset:
+    encoder_channels: int
+    decoder_channels: int
+    disc_channels: int
+    disc_depth: int
+    n_codebooks: int
+    codebook_size: int
+    batch_size: int
+    disc_start_step: int
+    save_every: int
+    eval_every: int
+    plot_every: int
+    sample_every: int
+    max_duration: float
+    label: str
+
+
+_PRESETS: Dict[str, _Preset] = {
+    # ── cpu ── tiny model that actually trains in minutes per epoch on 4 CPU cores
+    "cpu": _Preset(
+        encoder_channels=64,  decoder_channels=64,
+        disc_channels=16,     disc_depth=2,
+        n_codebooks=4,        codebook_size=256,
+        batch_size=2,         disc_start_step=200,
+        save_every=100,       eval_every=50,
+        plot_every=50,        sample_every=100,
+        max_duration=2.0,
+        label="CPU-tiny (64ch, 4 codebooks, batch=2)",
+    ),
+    # ── gpu-small ── fits in ~8 GB VRAM; good for RTX 3060 / T4
+    "gpu-small": _Preset(
+        encoder_channels=256, decoder_channels=256,
+        disc_channels=32,     disc_depth=3,
+        n_codebooks=6,        codebook_size=512,
+        batch_size=4,         disc_start_step=5_000,
+        save_every=2_000,     eval_every=500,
+        plot_every=200,       sample_every=1_000,
+        max_duration=4.0,
+        label="GPU-small (256ch, 6 codebooks, batch=4)",
+    ),
+    # ── gpu-full ── EnCodec-scale; needs ~16 GB VRAM (A100 / RTX 3090)
+    "gpu-full": _Preset(
+        encoder_channels=512, decoder_channels=512,
+        disc_channels=64,     disc_depth=4,
+        n_codebooks=8,        codebook_size=1024,
+        batch_size=8,         disc_start_step=10_000,
+        save_every=5_000,     eval_every=1_000,
+        plot_every=500,       sample_every=2_000,
+        max_duration=5.0,
+        label="GPU-full / EnCodec-scale (512ch, 8 codebooks, batch=8)",
+    ),
+}
+
+
+def resolve_preset(preset_name: str, device: torch.device) -> _Preset:
+    """
+    Return the appropriate preset.
+
+    'auto' maps to:
+      - 'cpu'       when no GPU is available
+      - 'gpu-small' when a CUDA GPU is present but has < 12 GB VRAM
+      - 'gpu-full'  when >= 12 GB VRAM detected
+    """
+    if preset_name != "auto":
+        return _PRESETS[preset_name]
+
+    if device.type != "cuda":
+        return _PRESETS["cpu"]
+
+    try:
+        vram_gb = torch.cuda.get_device_properties(device).total_memory / 1e9
+        if vram_gb >= 12:
+            return _PRESETS["gpu-full"]
+        return _PRESETS["gpu-small"]
+    except Exception:
+        return _PRESETS["gpu-small"]
+
+
 def main() -> None:
     args = parse_args()
 
@@ -2436,9 +2602,9 @@ def main() -> None:
     logger.info(f"Detected device: {device_info(detected)}")
     if detected.type == "cpu":
         logger.warning(
-            "No GPU detected — training on CPU. This will be significantly slower. "
+            "No GPU detected - training on CPU. This will be significantly slower. "
             "Consider using a machine with an NVIDIA GPU or Apple Silicon (MPS). "
-            "For faster CPU training, reduce batch_size and encoder_channels."
+            "Tip: pass --preset cpu to auto-scale the model for CPU training."
         )
 
     if args.command == "smoke-test":
@@ -2446,20 +2612,39 @@ def main() -> None:
         return
 
     if args.command == "train":
+        # ── Resolve effective device first (needed for preset selection) ──
+        eff_device = get_device(args.device)
+
+        # ── Preset ────────────────────────────────────────────────────────
+        preset = resolve_preset(args.preset, eff_device)
+        logger.info(f"Preset '{args.preset}' -> {preset.label}")
+
+        # Batch size: CLI flag > preset default
+        batch_size = args.batch_size if args.batch_size is not None else preset.batch_size
+
+        # ── Configs ───────────────────────────────────────────────────────
         audio_cfg = AudioConfig()
-        rvq_cfg   = RVQConfig()
-        model_cfg = ModelConfig()
+        rvq_cfg   = RVQConfig(
+            n_codebooks  = preset.n_codebooks,
+            codebook_size= preset.codebook_size,
+        )
+        model_cfg = ModelConfig(
+            encoder_channels = preset.encoder_channels,
+            decoder_channels = preset.decoder_channels,
+            disc_channels    = preset.disc_channels,
+            disc_depth       = preset.disc_depth,
+        )
         train_cfg = TrainingConfig(
-            data_dir        = args.data_dir,
-            checkpoint_dir  = args.checkpoint_dir,
-            log_dir         = args.log_dir,
-            plot_dir        = args.plot_dir,
-            output_dir      = args.output_dir,
-            batch_size      = args.batch_size,
-            num_epochs      = args.epochs,
-            learning_rate   = args.lr,
-            compile_model   = args.compile,
-            device          = args.device,
+            data_dir           = args.data_dir,
+            checkpoint_dir     = args.checkpoint_dir,
+            log_dir            = args.log_dir,
+            plot_dir           = args.plot_dir,
+            output_dir         = args.output_dir,
+            batch_size         = batch_size,
+            num_epochs         = args.epochs,
+            learning_rate      = args.lr,
+            compile_model      = args.compile,
+            device             = args.device,
             save_every_steps   = args.save_every,
             eval_every_steps   = args.eval_every,
             plot_every_steps   = args.plot_every,
@@ -2468,7 +2653,20 @@ def main() -> None:
             mixed_precision    = not args.no_amp,
             num_workers        = args.num_workers,
             seed               = args.seed,
+            max_duration       = preset.max_duration,
+            disc_start_step    = preset.disc_start_step,
         )
+
+        # ── Log the effective configuration ───────────────────────────────
+        logger.info(
+            f"Config: encoder={model_cfg.encoder_channels}ch  "
+            f"codebooks={rvq_cfg.n_codebooks}x{rvq_cfg.codebook_size}  "
+            f"batch={train_cfg.batch_size}  "
+            f"duration={train_cfg.max_duration}s  "
+            f"semantic={'OFF' if args.no_semantic else 'ON'}"
+        )
+
+        use_semantic = not args.no_semantic
 
         n_gpus = args.gpus if torch.cuda.is_available() else 1
         if args.gpus > 1 and not torch.cuda.is_available():
@@ -2478,12 +2676,12 @@ def main() -> None:
             import torch.multiprocessing as mp
             mp.spawn(
                 train,
-                args=(n_gpus, audio_cfg, rvq_cfg, model_cfg, train_cfg, args.resume),
+                args=(n_gpus, audio_cfg, rvq_cfg, model_cfg, train_cfg, args.resume, use_semantic),
                 nprocs=n_gpus,
                 join=True,
             )
         else:
-            train(0, 1, audio_cfg, rvq_cfg, model_cfg, train_cfg, args.resume)
+            train(0, 1, audio_cfg, rvq_cfg, model_cfg, train_cfg, args.resume, use_semantic)
 
     elif args.command == "encode":
         model = _load_model_from_checkpoint(args.checkpoint, args.device)
